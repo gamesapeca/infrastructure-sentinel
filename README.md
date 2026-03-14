@@ -1,7 +1,5 @@
 # Infrastructure Response Sentinel v2.0
 
-![Sentinel Dashboard](https://raw.githubusercontent.com/your-username/infrastructure-sentinel/main/preview.png)
-
 A high-performance, asynchronous server health monitor designed for stress-testing and infrastructure resilience analysis. Built with Python, `asyncio`, and `Rich`.
 
 ## 🚀 Features
@@ -16,7 +14,7 @@ A high-performance, asynchronous server health monitor designed for stress-testi
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/infrastructure-sentinel.git
+   git clone https://github.com/gamesapeca/infrastructure-sentinel.git
    cd infrastructure-sentinel
    ```
 
