@@ -1,0 +1,18 @@
+# Bytecode/Logs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Output/Data
+*.json
+*.log
+logs/
+
+# Test Servers
+mock_server.py
+current_stats.json
+
+# IDEs
+.vscode/
+.idea/
