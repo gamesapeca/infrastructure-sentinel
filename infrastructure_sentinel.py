@@ -134,12 +134,14 @@ async def main():
     log_queue = asyncio.Queue() if args.output else None
     
     async with aiohttp.ClientSession() as session:
-        # Create worker cluster as tasks
-        tasks = [asyncio.create_task(worker(args.url, session, stats, args.rate, args.timeout, log_queue)) 
+        # 1. Cria a lista SÓ com os workers e a UI
+        worker_tasks = [asyncio.create_task(worker(args.url, session, stats, args.rate, args.timeout, log_queue)) 
                  for _ in range(args.workers)]
         
+        logger_task = None
         if log_queue:
-            tasks.append(asyncio.create_task(logger_worker(log_queue, args.output)))
+            # 2. Guarda o logger isolado
+            logger_task = asyncio.create_task(logger_worker(log_queue, args.output))
 
         try:
             with Live(generate_table(stats, args.url), refresh_per_second=4, console=console) as live:
@@ -149,22 +151,25 @@ async def main():
                         live.update(generate_table(stats, args.url))
                         await asyncio.sleep(0.25)
                 
-                tasks.append(asyncio.create_task(update_ui()))
-                await asyncio.gather(*tasks)
+                worker_tasks.append(asyncio.create_task(update_ui()))
+                
+                # Executa apenas os workers e UI no gather principal
+                await asyncio.gather(*worker_tasks)
                 
         except KeyboardInterrupt:
             console.print("\n[bold red][!] Sentinel stopped by user. Shutting down gracefully...[/]")
             
-            # 1. Avisa o logger para terminar de escrever o que está na fila
-            if log_queue:
-                log_queue.put_nowait(None)
-            
-            # 2. Cancela os workers e a UI
-            for task in tasks:
+            # 1. Cancela apenas os workers e a UI (Eles param de gerar novos dados)
+            for task in worker_tasks:
                 task.cancel()
             
-            # 3. Dá tempo ao Event Loop para processar o cancelamento (fechar arquivos/conexões)
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # 2. Avisa o logger que acabou e ESPERA ele esvaziar a fila e fechar o arquivo
+            if log_queue and logger_task:
+                log_queue.put_nowait(None)
+                await logger_task 
+            
+            # 3. Limpa o cancelamento dos workers
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
             
         except Exception as e:
             console.print(f"\n[bold red][!] Fatal error: {e}[/]")
