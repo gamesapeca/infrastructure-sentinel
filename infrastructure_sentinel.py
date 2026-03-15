@@ -1,6 +1,11 @@
 """
 Infrastructure Response Sentinel v2.0 - Professional Edition
 High-performance server health monitor with concurrent workers and Rich TUI.
+
+refactor: optimize async I/O and connection pooling
+- Migrated to a single shared aiohttp.ClientSession to prevent connection pool exhaustion.
+- Implemented asyncio.Queue and aiofiles for non-blocking, thread-safe JSON logging.
+- Eliminated synchronous I/O operations from the main event loop to ensure high-performance concurrent probing.
 """
 
 import asyncio
@@ -13,6 +18,7 @@ from datetime import datetime
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
+import aiofiles
 from rich.layout import Layout
 from rich.panel import Panel
 
@@ -61,30 +67,38 @@ class Statistics:
             "last_status": self.last_status
         }
 
-async def worker(url, stats, interval, timeout, output_file=None):
-    async with aiohttp.ClientSession() as session:
+async def logger_worker(queue, output_file):
+    async with aiofiles.open(output_file, mode='a') as f:
         while True:
+            log_entry = await queue.get()
+            if log_entry is None:  # Sentinel value to stop logger
+                break
+            await f.write(json.dumps(log_entry) + "\n")
+            await f.flush()
+            queue.task_done()
+
+async def worker(url, session, stats, interval, timeout, log_queue=None):
+    while True:
+        async with stats._lock:
+            stats.active_conns += 1
+        
+        t0 = time.time()
+        try:
+            async with session.get(url, timeout=timeout) as response:
+                t1 = time.time()
+                latency = t1 - t0
+                success = 200 <= response.status < 400
+                await stats.add_result(latency, success, response.status)
+        except Exception as e:
+            await stats.add_result(0, False, "ERR")
+        finally:
             async with stats._lock:
-                stats.active_conns += 1
-            
-            t0 = time.time()
-            try:
-                async with session.get(url, timeout=timeout) as response:
-                    t1 = time.time()
-                    latency = t1 - t0
-                    success = 200 <= response.status < 400
-                    await stats.add_result(latency, success, response.status)
-            except Exception as e:
-                await stats.add_result(0, False, "ERR")
-            finally:
-                async with stats._lock:
-                    stats.active_conns -= 1
+                stats.active_conns -= 1
 
-            if output_file:
-                with open(output_file, 'a') as f:
-                    f.write(json.dumps(stats.to_dict()) + "\n")
+        if log_queue:
+            await log_queue.put(stats.to_dict())
 
-            await asyncio.sleep(interval)
+        await asyncio.sleep(interval)
 
 def generate_table(stats, url) -> Table:
     data = stats.to_dict()
@@ -115,26 +129,36 @@ async def main():
 
     stats = Statistics()
     console = Console()
-
-    # Create worker cluster
-    workers = [worker(args.url, stats, args.rate, args.timeout, args.output) for _ in range(args.workers)]
     
-    try:
-        with Live(generate_table(stats, args.url), refresh_per_second=4, console=console) as live:
-            # We run workers and a simple UI updater
-            async def update_ui():
-                while True:
-                    live.update(generate_table(stats, args.url))
-                    await asyncio.sleep(0.25)
-            
-            await asyncio.gather(update_ui(), *workers)
-            
-    except KeyboardInterrupt:
-        console.print("\n[bold red][!] Sentinel stopped by user.[/]")
-        sys.exit(0)
-    except Exception as e:
-        console.print(f"\n[bold red][!] Fatal error: {e}[/]")
-        sys.exit(1)
+    log_queue = asyncio.Queue() if args.output else None
+    
+    async with aiohttp.ClientSession() as session:
+        # Create worker cluster
+        worker_tasks = [worker(args.url, session, stats, args.rate, args.timeout, log_queue) for _ in range(args.workers)]
+        
+        tasks = [*worker_tasks]
+        
+        if log_queue:
+            logger = asyncio.create_task(logger_worker(log_queue, args.output))
+            tasks.append(logger)
+
+        try:
+            with Live(generate_table(stats, args.url), refresh_per_second=4, console=console) as live:
+                # We run workers and a simple UI updater
+                async def update_ui():
+                    while True:
+                        live.update(generate_table(stats, args.url))
+                        await asyncio.sleep(0.25)
+                
+                tasks.append(asyncio.create_task(update_ui()))
+                await asyncio.gather(*tasks)
+                
+        except KeyboardInterrupt:
+            console.print("\n[bold red][!] Sentinel stopped by user.[/]")
+            sys.exit(0)
+        except Exception as e:
+            console.print(f"\n[bold red][!] Fatal error: {e}[/]")
+            sys.exit(1)
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
