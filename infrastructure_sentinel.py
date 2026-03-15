@@ -10,6 +10,7 @@ refactor: optimize async I/O and connection pooling
 
 import asyncio
 import aiohttp
+from aiohttp import ClientTimeout
 import time
 import json
 import sys
@@ -84,7 +85,7 @@ async def worker(url, session, stats, interval, timeout, log_queue=None):
         
         t0 = time.time()
         try:
-            async with session.get(url, timeout=timeout) as response:
+            async with session.get(url, timeout=ClientTimeout(total=timeout)) as response:
                 t1 = time.time()
                 latency = t1 - t0
                 success = 200 <= response.status < 400
@@ -133,14 +134,12 @@ async def main():
     log_queue = asyncio.Queue() if args.output else None
     
     async with aiohttp.ClientSession() as session:
-        # Create worker cluster
-        worker_tasks = [worker(args.url, session, stats, args.rate, args.timeout, log_queue) for _ in range(args.workers)]
-        
-        tasks = [*worker_tasks]
+        # Create worker cluster as tasks
+        tasks = [asyncio.create_task(worker(args.url, session, stats, args.rate, args.timeout, log_queue)) 
+                 for _ in range(args.workers)]
         
         if log_queue:
-            logger = asyncio.create_task(logger_worker(log_queue, args.output))
-            tasks.append(logger)
+            tasks.append(asyncio.create_task(logger_worker(log_queue, args.output)))
 
         try:
             with Live(generate_table(stats, args.url), refresh_per_second=4, console=console) as live:
@@ -154,7 +153,9 @@ async def main():
                 await asyncio.gather(*tasks)
                 
         except KeyboardInterrupt:
-            console.print("\n[bold red][!] Sentinel stopped by user.[/]")
+            console.print("\n[bold red][!] Sentinel stopped by user. Shutting down gracefully...[/]")
+            for task in tasks:
+                task.cancel()
             sys.exit(0)
         except Exception as e:
             console.print(f"\n[bold red][!] Fatal error: {e}[/]")
