@@ -154,9 +154,18 @@ async def main():
                 
         except KeyboardInterrupt:
             console.print("\n[bold red][!] Sentinel stopped by user. Shutting down gracefully...[/]")
+            
+            # 1. Avisa o logger para terminar de escrever o que está na fila
+            if log_queue:
+                log_queue.put_nowait(None)
+            
+            # 2. Cancela os workers e a UI
             for task in tasks:
                 task.cancel()
-            sys.exit(0)
+            
+            # 3. Dá tempo ao Event Loop para processar o cancelamento (fechar arquivos/conexões)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
         except Exception as e:
             console.print(f"\n[bold red][!] Fatal error: {e}[/]")
             sys.exit(1)
